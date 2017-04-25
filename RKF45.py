@@ -7,15 +7,31 @@ Solve ODE's numerically via adaptive RKF45.
 
 Manages step size based on error estimate.
 
-@version: 10.12.2016
+@version: 04.24.2016
 @author: Luke_Wortsmann
 """
 import numpy as np
-from numba import jit, autojit
-from scipy.interpolate import interp1d
+from scipy.interpolate import UnivariateSpline
 
 
-@jit
+class RKF45Error(Exception):
+
+    def __init__(self, message):
+        self.message = message
+
+    def __str__(self):
+        return self.message
+
+
+B0 = np.array([1. / 4., 0., 0., 0., 0., 0.])
+B1 = np.array([3. / 32., 9. / 32., 0., 0., 0., 0.])
+B2 = np.array([1932. / 2197., -7200. / 2197., 7296. / 2197., 0., 0., 0.])
+B3 = np.array([439. / 216., -8., 3680. / 513., - 845. / 4104., 0., 0.])
+B4 = np.array([-8. / 27., 2., -3544. / 2565., -1859. / 4104., -11. / 40., 0.])
+B5 = np.array([25. / 216., 0., 1408. / 2565., 2197. / 4104., -1. / 5., 0.])
+B6 = np.array([16. / 135., 0., 6656. / 12825., 28561. / 56430., -9. / 50., 2. / 55.])
+
+
 def RKF45_step(f, t, x, h):
     """
     A evaluation step of RKF45, performs 6 function evaluations. Step accuracy
@@ -41,93 +57,132 @@ def RKF45_step(f, t, x, h):
     e  : float
          Error estimate of next ODE state
     """
-    k1 = f(t, x)
-    y2 = x + (h / 4.) * k1
-    k2 = f(t + (1./4.) * h, y2)
-    y3 = x + h * ((3. / 32.) * k1 + (9. / 32.) * k2)
-    k3 = f(t + (3./8.) * h, y3)
-    y4 = x + h * ((1932. / 2197.) * k1 - (7200. / 2197.) * k2 + (7296. / 2197.) * k3)
-    k4 = f(t + (12./13.) * h, y4)
-    y5 = x + h * ((439. / 216.) * k1 + (-8.) * k2 + (3680. / 513.) * k3 - (845. / 4104.) * k4)
-    k5 = f(t + h, y5)
-    y6 = x + h * (-(8. / 27.) * k1 + (2.) * k2 - (3544. / 2565.) * k3
-                   - (1859. / 4104.) * k4 - (11. / 40.) * k5)
-    k6 = f(t + (1./2.) * h, y6)
-    b5 = np.array([16. / 135., 0., 6656. / 12825., 28561. / 56430., -9. / 50., 2. / 55.])
-    b4 = np.array([25. / 216., 0., 1408. / 2565., 2197. / 4104., -1. / 5., 0.])
-    K =  np.array([k1, k2, k3, k4, k5, k6])
+    K = np.zeros((6,) + x.shape, dtype=x.dtype)
+    K[0] = f(t, x)
+
+    y2 = x + h * B0.dot(K)
+    K[1] = f(t + (1./4.) * h, y2)
+
+    y3 = x + h * B1.dot(K)
+    K[2] = f(t + (3./8.) * h, y3)
+
+    y4 = x + h * B2.dot(K)
+    K[3] = f(t + (12./13.) * h, y4)
+
+    y5 = x + h * B3.dot(K)
+    K[4] = f(t + h, y5)
+
+    y6 = x + h * B4.dot(K)
+    K[5] = f(t + (1./2.) * h, y6)
+
     # Update state:
-    xn = x + h * (b4.dot(K))
+    xn = x + h * B5.dot(K)
+
     # Error estimate:
-    e = np.linalg.norm(abs( (h * (b5 - b4).dot(K)) / (abs(xn) + 1e-15)))
+    xmag = np.abs(xn)
+    xerr = np.abs( h * (B6 - B5).dot(K) )
+
+    xerr[xerr == 0.0] = 1.
+    xmag[xmag == 0.0] = xerr[xmag == 0.0]
+    e = np.max( xerr / xmag )
+
     return t + h, xn, e
 
 
-def RKF45(f, x0, tf, ti=0, fkwargs=dict(), tol=1e-5, max_steps=1e6, interpolation='linear'):
+def RKF45(f, x0, stop, ti=0, fargs=(), fkwargs=dict(), h0=1e-6, tol=1e-6, maxSteps=1e6, warn=True):
     """
     Implimentation of the Runge–Kutta–Fehlberg method or RKF45 for solving ODE's
     numerically.
 
     Parameters
     ----------
-    f  : function
-         ODE functional, x'(t) = f(t, x(t), **fkwargs)
-    x0 : number or np.ndarray
-         Initial ODE state, x(ti) = x0
-    tf : number
-         Final time, ODE time to solve until
+    f    : function
+           ODE functional, x'(t) = f(t, x(t))
+    x0   : number or np.ndarray
+           Initial ODE state, x(ti) = x0
+    stop : function
+           Integrate until stopf(t, x(t)) is True
 
     Keyword Arguments
     -----------------
-    ti  : number, 0
-          Inital time of the ODE, corresponding to state x0
-    fkwargs: dict, None
-          Keyword arguments for the ODE functional
-    tol : number, 1e-5
-          Error tolerance
-    max_steps : number, 1e6
-          Maximum number of steps to take
-    interpolation : str or int, 'linear'
-          Interpolation kind, see scipy.interpolate.interp1d
+    ti       : number, 0
+               Inital time of the ODE, corresponding to state x0
+    fargs    : tuple, None
+               Additional arguments for the ODE functional
+    fkwargs  : dict, None
+               Keyword arguments for the ODE functional
+    h0       : number, 1e-6
+               Error tolerance
+    tol      : number, 1e-6
+               Error tolerance
+    maxSteps : number, 1e6
+               Maximum number of steps to take
+    warn     : bool, True
+               Raise RKF45Error if failed to stop
 
     Returns
     -------
-    x : function
-        Interpolated solution to the ODE, call x(t) for ti <= t <= tf for
-        numerical solution to the ODE.
+    tf : number
+         Stopping time
+    x  : dict of scipy.interpolate.InterpolatedUnivariateSpline
+         Interpolated solution to the ODE, call x[n](t) for ti <= t <= tf for
+         numerical solution to the nth varible of the ODE.
     """
-    # Minimum stepsize:
-    min_h = (tf - ti) / max_steps
     # Initialize varibles:
-    T, E = np.zeros((2, 2 * int(max_steps)))
-    X = np.zeros((2 * int(max_steps),) + np.array(x0).shape)
-    T[0], X[0], i, h = ti, x0, 0, min_h
-    # Add kwargs to function:
-    f_eval = lambda t, x: f(t, x, **fkwargs)
-    while True:
-        # Get update for stepsize:
-        t_update, y_update, error = RKF45_step(f_eval, T[i], X[i], h)
-        if (error < tol) or (h < min_h):
-            # Keep if error acceptable or smaller than minimum stepsize
-            i += 1
-            h *= 2
-            T[i] = t_update
-            X[i] = y_update
-            E[i] = error
-            if t_update >= tf:
-                # Done if past tf
+    x0, ti = np.array(x0), float(ti)
+    X, T, E = [x0], [ti], []
+    f_eval = lambda t, x: f(t, x, *fargs, **fkwargs)
+    h, maxSteps = float(h0), int(maxSteps)
+    warn, stopping = bool(warn), False
+
+    try:
+        stop(ti, x0)
+    except TypeError:
+        tf = float(stop)
+        stop = lambda t, x, *fargs, **fkwargs: t > tf
+
+    for i in range(maxSteps):
+        t_n, x_n, e_n = RKF45_step(f_eval, T[-1], X[-1], h)
+
+        if stop(t_n, x_n, *fargs, **fkwargs):
+            stopping = True
+
+        elif e_n < tol:
+            T.append( t_n )
+            X.append( x_n )
+            E.append( e_n )
+
+        if stopping:
+            if (h / t_n) < tol:
+                warn = False
                 break
+            else:
+                h *= 0.5
+
+        elif e_n < tol:
+            h *= 2
+
         else:
-            # Otherwise decrease stepsize
             h *= 0.5
-    # Return interpolation function from calculated points:
-    return interp1d(T[:i + 1], X[:i + 1], kind=interpolation, axis=0, assume_sorted=True)
 
+        if h / t_n == 0.0:
+            # stiff solution
+            warn = False
+            break
 
-if __name__ == '__main__':
-    import matplotlib.pyplot as plt
-    f = lambda t, x: np.exp(1j * t * np.cos(x)**2) - x
-    g = RKF45(f, 0, 1)
-    t = np.linspace(0, 1, 1000)
-    plt.plot(t, g(t))
-    plt.show()
+    T, X, E = np.array(T), np.array(X), np.array(E)
+
+    if warn:
+        raise RKF45Error( 'Did not stop after %s steps'%maxSteps )
+
+    nV = X.shape[1]
+    Xspl = dict()
+    for j in range(nV):
+        reQ = np.all(np.imag(X[:, j]) == 0.)
+        if reQ:
+            Xspl[j] = UnivariateSpline(T, np.real(X[:, j]), k=3, ext=3, s=0)
+        else:
+            Xspl[str(j) + ' RE'] = UnivariateSpline(T, np.real(X[:, j]), k=3, ext=3, s=0)
+            Xspl[str(j) + ' IM'] = UnivariateSpline(T, np.imag(X[:, j]), k=3, ext=3, s=0)
+
+    return T[-1], Xspl
