@@ -14,15 +14,6 @@ import numpy as np
 from scipy.interpolate import UnivariateSpline
 
 
-class RKF45Error(Exception):
-
-    def __init__(self, message):
-        self.message = message
-
-    def __str__(self):
-        return self.message
-
-
 B0 = np.array([1. / 4., 0., 0., 0., 0., 0.])
 B1 = np.array([3. / 32., 9. / 32., 0., 0., 0., 0.])
 B2 = np.array([1932. / 2197., -7200. / 2197., 7296. / 2197., 0., 0., 0.])
@@ -89,7 +80,7 @@ def RKF45_step(f, t, x, h):
     return t + h, xn, e
 
 
-def RKF45(f, x0, stop, ti=0, fargs=(), fkwargs=dict(), h0=1e-6, tol=1e-6, maxSteps=1e6, warn=True):
+def RKF45(f, x0, stop, ti=0, fargs=(), fkwargs=dict(), h0=1e-6, tol=1e-6, maxSteps=1e6, retAll=False):
     """
     Implimentation of the Runge–Kutta–Fehlberg method or RKF45 for solving ODE's
     numerically.
@@ -133,7 +124,7 @@ def RKF45(f, x0, stop, ti=0, fargs=(), fkwargs=dict(), h0=1e-6, tol=1e-6, maxSte
     X, T, E = [x0], [ti], []
     f_eval = lambda t, x: f(t, x, *fargs, **fkwargs)
     h, maxSteps = float(h0), int(maxSteps)
-    warn, stopping = bool(warn), False
+    warn, stopping = True, False
 
     try:
         stop(ti, x0)
@@ -165,15 +156,16 @@ def RKF45(f, x0, stop, ti=0, fargs=(), fkwargs=dict(), h0=1e-6, tol=1e-6, maxSte
         else:
             h *= 0.5
 
-        if h / t_n == 0.0:
+        if float(T[-1] + h) == float(T[-1]):
             # stiff solution
+            print( 'WARNING: Stiff Solution' )
             warn = False
             break
 
     T, X, E = np.array(T), np.array(X), np.array(E)
 
     if warn:
-        raise RKF45Error( 'Did not stop after %s steps'%maxSteps )
+        print( 'WARNING: Did Not Stop' )
 
     nV = X.shape[1]
     Xspl = dict()
@@ -185,4 +177,7 @@ def RKF45(f, x0, stop, ti=0, fargs=(), fkwargs=dict(), h0=1e-6, tol=1e-6, maxSte
             Xspl[str(j) + ' RE'] = UnivariateSpline(T, np.real(X[:, j]), k=3, ext=3, s=0)
             Xspl[str(j) + ' IM'] = UnivariateSpline(T, np.imag(X[:, j]), k=3, ext=3, s=0)
 
-    return T[-1], Xspl
+    if retAll:
+        return T[-1], Xspl, T, X, E
+    else:
+        return T[-1], Xspl
